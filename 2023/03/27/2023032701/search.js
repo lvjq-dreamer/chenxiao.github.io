@@ -1,227 +1,25 @@
-class LocalSearch {
-  constructor({
-    path = '',
-    unescape = false,
-    top_n_per_article = 1
-  }) {
-    this.path = path;
-    this.unescape = unescape;
-    this.top_n_per_article = top_n_per_article;
-    this.isfetched = false;
-    this.datas = null;
-  }
-
-  getIndexByWord(words, text, caseSensitive = false) {
-    const index = [];
-    const included = new Set();
-
-    if (!caseSensitive) {
-      text = text.toLowerCase();
-    }
-    words.forEach(word => {
-      if (this.unescape) {
-        const div = document.createElement('div');
-        div.innerText = word;
-        word = div.innerHTML;
-      }
-      const wordLen = word.length;
-      if (wordLen === 0) return;
-      let startPosition = 0;
-      let position = -1;
-      if (!caseSensitive) {
-        word = word.toLowerCase();
-      }
-      while ((position = text.indexOf(word, startPosition)) > -1) {
-        index.push({ position, word });
-        included.add(word);
-        startPosition = position + wordLen;
-      }
-    });
-    // Sort index by position of keyword
-    index.sort((left, right) => {
-      if (left.position !== right.position) {
-        return left.position - right.position;
-      }
-      return right.word.length - left.word.length;
-    });
-    return [index, included];
-  }
-
-  // Merge hits into slices
-  mergeIntoSlice(start, end, index) {
-    let item = index[0];
-    let { position, word } = item;
-    const hits = [];
-    const count = new Set();
-    while (position + word.length <= end && index.length !== 0) {
-      count.add(word);
-      hits.push({
-        position,
-        length: word.length
-      });
-      const wordEnd = position + word.length;
-
-      // Move to next position of hit
-      index.shift();
-      while (index.length !== 0) {
-        item = index[0];
-        position = item.position;
-        word = item.word;
-        if (wordEnd > position) {
-          index.shift();
-        } else {
-          break;
-        }
-      }
-    }
-    return {
-      hits,
-      start,
-      end,
-      count: count.size
-    };
-  }
-
-  // Highlight title and content
-  highlightKeyword(val, slice) {
-    let result = '';
-    let index = slice.start;
-    for (const { position, length } of slice.hits) {
-      result += val.substring(index, position);
-      index = position + length;
-      result += `<mark class="search-keyword">${val.substr(position, length)}</mark>`;
-    }
-    result += val.substring(index, slice.end);
-    return result;
-  }
-
-  getResultItems(keywords) {
-    const resultItems = [];
-    this.datas.forEach(({ title, content, url }) => {
-      // The number of different keywords included in the article.
-      const [indexOfTitle, keysOfTitle] = this.getIndexByWord(keywords, title);
-      const [indexOfContent, keysOfContent] = this.getIndexByWord(keywords, content);
-      const includedCount = new Set([...keysOfTitle, ...keysOfContent]).size;
-
-      // Show search results
-      const hitCount = indexOfTitle.length + indexOfContent.length;
-      if (hitCount === 0) return;
-
-      const slicesOfTitle = [];
-      if (indexOfTitle.length !== 0) {
-        slicesOfTitle.push(this.mergeIntoSlice(0, title.length, indexOfTitle));
-      }
-
-      let slicesOfContent = [];
-      while (indexOfContent.length !== 0) {
-        const item = indexOfContent[0];
-        const { position } = item;
-        // Cut out 100 characters. The maxlength of .search-input is 80.
-        const start = Math.max(0, position - 20);
-        const end = Math.min(content.length, position + 80);
-        slicesOfContent.push(this.mergeIntoSlice(start, end, indexOfContent));
-      }
-
-      // Sort slices in content by included keywords' count and hits' count
-      slicesOfContent.sort((left, right) => {
-        if (left.count !== right.count) {
-          return right.count - left.count;
-        } else if (left.hits.length !== right.hits.length) {
-          return right.hits.length - left.hits.length;
-        }
-        return left.start - right.start;
-      });
-
-      // Select top N slices in content
-      const upperBound = parseInt(this.top_n_per_article, 10);
-      if (upperBound >= 0) {
-        slicesOfContent = slicesOfContent.slice(0, upperBound);
-      }
-
-      let resultItem = '';
-
-      url = new URL(url, location.origin);
-      url.searchParams.append('highlight', keywords.join(' '));
-
-      if (slicesOfTitle.length !== 0) {
-        resultItem += `<li><a href="${url.href}" class="search-result-title">${this.highlightKeyword(title, slicesOfTitle[0])}</a>`;
-      } else {
-        resultItem += `<li><a href="${url.href}" class="search-result-title">${title}</a>`;
-      }
-
-      slicesOfContent.forEach(slice => {
-        resultItem += `<a href="${url.href}"><p class="search-result">${this.highlightKeyword(content, slice)}...</p></a>`;
-      });
-
-      resultItem += '</li>';
-      resultItems.push({
-        item: resultItem,
-        id  : resultItems.length,
-        hitCount,
-        includedCount
-      });
-    });
-    return resultItems;
-  }
-
-  fetchData() {
-    const isXml = !this.path.endsWith('json');
-    fetch(this.path)
-      .then(response => response.text())
-      .then(res => {
-        // Get the contents from search data
-        this.isfetched = true;
-        this.datas = isXml ? [...new DOMParser().parseFromString(res, 'text/xml').querySelectorAll('entry')].map(element => ({
-          title  : element.querySelector('title').textContent,
-          content: element.querySelector('content').textContent,
-          url    : element.querySelector('url').textContent
-        })) : JSON.parse(res);
-        // Only match articles with non-empty titles
-        this.datas = this.datas.filter(data => data.title).map(data => {
-          data.title = data.title.trim();
-          data.content = data.content ? data.content.trim().replace(/<[^>]+>/g, '') : '';
-          data.url = decodeURIComponent(data.url).replace(/\/{2,}/g, '/');
-          return data;
-        });
-        // Remove loading animation
-        window.dispatchEvent(new Event('search:loaded'));
-      });
-  }
-
-  // Highlight by wrapping node in mark elements with the given class name
-  highlightText(node, slice, className) {
-    const val = node.nodeValue;
-    let index = slice.start;
-    const children = [];
-    for (const { position, length } of slice.hits) {
-      const text = document.createTextNode(val.substring(index, position));
-      index = position + length;
-      const mark = document.createElement('mark');
-      mark.className = className;
-      mark.appendChild(document.createTextNode(val.substr(position, length)));
-      children.push(text, mark);
-    }
-    node.nodeValue = val.substring(index, slice.end);
-    children.forEach(element => {
-      node.parentNode.insertBefore(element, node);
-    });
-  }
-
-  // Highlight the search words provided in the url in the text
-  highlightSearchWords(body) {
-    const params = new URL(location.href).searchParams.get('highlight');
-    const keywords = params ? params.split(' ') : [];
-    if (!keywords.length || !body) return;
-    const walk = document.createTreeWalker(body, NodeFilter.SHOW_TEXT, null);
-    const allNodes = [];
-    while (walk.nextNode()) {
-      if (!walk.currentNode.parentNode.matches('button, select, textarea')) allNodes.push(walk.currentNode);
-    }
-    allNodes.forEach(node => {
-      const [indexOfNode] = this.getIndexByWord(keywords, node.nodeValue);
-      if (!indexOfNode.length) return;
-      const slice = this.mergeIntoSlice(0, node.nodeValue.length, indexOfNode);
-      this.highlightText(node, slice, 'search-keyword');
-    });
-  }
-}
+class LocalSearch{constructor({path:t="",unescape:e=!1,top_n_per_article:n=1}){this.path=t,this.unescape=e,this.top_n_per_article=n,this.isfetched=!1,this.datas=null}getIndexByWord(t,e,n=!1){const s=[],r=new Set;return n||(e=e.toLowerCase()),t.forEach((t=>{if(this.unescape){const e=document.createElement("div");e.innerText=t,t=e.innerHTML}const o=t.length;if(0===o)return;let h=0,i=-1;for(n||(t=t.toLowerCase());(i=e.indexOf(t,h))>-1;)s.push({position:i,word:t}),r.add(t),h=i+o})),
+// Sort index by position of keyword
+s.sort(((t,e)=>t.position!==e.position?t.position-e.position:e.word.length-t.word.length)),[s,r]}
+// Merge hits into slices
+mergeIntoSlice(t,e,n){let s=n[0],{position:r,word:o}=s;const h=[],i=new Set;for(;r+o.length<=e&&0!==n.length;){i.add(o),h.push({position:r,length:o.length});const t=r+o.length;
+// Move to next position of hit
+for(n.shift();0!==n.length&&(s=n[0],r=s.position,o=s.word,t>r);)n.shift()}return{hits:h,start:t,end:e,count:i.size}}
+// Highlight title and content
+highlightKeyword(t,e){let n="",s=e.start;for(const{position:r,length:o}of e.hits)n+=t.substring(s,r),s=r+o,n+=`<mark class="search-keyword">${t.substr(r,o)}</mark>`;return n+=t.substring(s,e.end),n}getResultItems(t){const e=[];return this.datas.forEach((({title:n,content:s,url:r})=>{
+// The number of different keywords included in the article.
+const[o,h]=this.getIndexByWord(t,n),[i,l]=this.getIndexByWord(t,s),a=new Set([...h,...l]).size,c=o.length+i.length;if(0===c)return;const d=[];0!==o.length&&d.push(this.mergeIntoSlice(0,n.length,o));let g=[];for(;0!==i.length;){const t=i[0],{position:e}=t,n=Math.max(0,e-20),r=Math.min(s.length,e+80);g.push(this.mergeIntoSlice(n,r,i))}
+// Sort slices in content by included keywords' count and hits' count
+g.sort(((t,e)=>t.count!==e.count?e.count-t.count:t.hits.length!==e.hits.length?e.hits.length-t.hits.length:t.start-e.start));
+// Select top N slices in content
+const u=parseInt(this.top_n_per_article,10);u>=0&&(g=g.slice(0,u));let p="";(r=new URL(r,location.origin)).searchParams.append("highlight",t.join(" ")),0!==d.length?p+=`<li><a href="${r.href}" class="search-result-title">${this.highlightKeyword(n,d[0])}</a>`:p+=`<li><a href="${r.href}" class="search-result-title">${n}</a>`,g.forEach((t=>{p+=`<a href="${r.href}"><p class="search-result">${this.highlightKeyword(s,t)}...</p></a>`})),p+="</li>",e.push({item:p,id:e.length,hitCount:c,includedCount:a})})),e}fetchData(){const t=!this.path.endsWith("json");fetch(this.path).then((t=>t.text())).then((e=>{
+// Get the contents from search data
+this.isfetched=!0,this.datas=t?[...(new DOMParser).parseFromString(e,"text/xml").querySelectorAll("entry")].map((t=>({title:t.querySelector("title").textContent,content:t.querySelector("content").textContent,url:t.querySelector("url").textContent}))):JSON.parse(e),
+// Only match articles with non-empty titles
+this.datas=this.datas.filter((t=>t.title)).map((t=>(t.title=t.title.trim(),t.content=t.content?t.content.trim().replace(/<[^>]+>/g,""):"",t.url=decodeURIComponent(t.url).replace(/\/{2,}/g,"/"),t))),
+// Remove loading animation
+window.dispatchEvent(new Event("search:loaded"))}))}
+// Highlight by wrapping node in mark elements with the given class name
+highlightText(t,e,n){const s=t.nodeValue;let r=e.start;const o=[];for(const{position:t,length:h}of e.hits){const e=document.createTextNode(s.substring(r,t));r=t+h;const i=document.createElement("mark");i.className=n,i.appendChild(document.createTextNode(s.substr(t,h))),o.push(e,i)}t.nodeValue=s.substring(r,e.end),o.forEach((e=>{t.parentNode.insertBefore(e,t)}))}
+// Highlight the search words provided in the url in the text
+highlightSearchWords(t){const e=new URL(location.href).searchParams.get("highlight"),n=e?e.split(" "):[];if(!n.length||!t)return;const s=document.createTreeWalker(t,NodeFilter.SHOW_TEXT,null),r=[];for(;s.nextNode();)s.currentNode.parentNode.matches("button, select, textarea")||r.push(s.currentNode);r.forEach((t=>{const[e]=this.getIndexByWord(n,t.nodeValue);if(!e.length)return;const s=this.mergeIntoSlice(0,t.nodeValue.length,e);this.highlightText(t,s,"search-keyword")}))}}
